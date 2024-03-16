@@ -24,35 +24,35 @@ impl Color {
     }
 
     /// Return a new [RGBA] from the Color
-    pub fn get_rgba(&self) -> RGBA {
+    pub const fn get_rgba(&self) -> RGBA {
         match self {
             Color::CurrentColor => RGBA::rgba(0, 0, 0, 0),
             Color::RGBA(rgba) => *rgba,
         }
     }
 
-    pub fn r(&self) -> u8 {
+    pub const fn r(&self) -> u8 {
         match self {
             Color::CurrentColor => 0,
             Color::RGBA(col) => col.r(),
         }
     }
 
-    pub fn g(&self) -> u8 {
+    pub const fn g(&self) -> u8 {
         match self {
             Color::CurrentColor => 0,
             Color::RGBA(col) => col.g(),
         }
     }
 
-    pub fn b(&self) -> u8 {
+    pub const fn b(&self) -> u8 {
         match self {
             Color::CurrentColor => 0,
             Color::RGBA(col) => col.b(),
         }
     }
 
-    pub fn a(&self) -> u8 {
+    pub const fn a(&self) -> u8 {
         match self {
             Color::CurrentColor => 0,
             Color::RGBA(col) => col.a(),
@@ -758,19 +758,19 @@ impl RGBA {
         Self::rgba(r, g, b, a)
     }
 
-    pub fn r(&self) -> u8 {
+    pub const fn r(&self) -> u8 {
         self.red
     }
 
-    pub fn g(&self) -> u8 {
+    pub const fn g(&self) -> u8 {
         self.green
     }
 
-    pub fn b(&self) -> u8 {
+    pub const fn b(&self) -> u8 {
         self.blue
     }
 
-    pub fn a(&self) -> u8 {
+    pub const fn a(&self) -> u8 {
         self.alpha
     }
 }
@@ -796,26 +796,46 @@ fn hue(mut h: f32, m1: f32, m2: f32) -> f32 {
     m1
 }
 
+impl From<RGBA> for (f32, f32, f32, f32) {
+    fn from(src: RGBA) -> Self {
+        (
+            src.r() as f32 / 255.0,
+            src.g() as f32 / 255.0,
+            src.b() as f32 / 255.0,
+            src.a() as f32 / 255.0,
+        )
+    }
+}
+
+impl From<RGBA> for skia_safe::Color4f {
+    fn from(src: RGBA) -> Self {
+        let (r, g, b, a) = src.into();
+        Self { r, g, b, a }
+    }
+}
+
+impl From<RGBA> for skia_safe::Color {
+    fn from(src: RGBA) -> Self {
+        let RGBA { red, green, blue, alpha } = src;
+        Self::from_argb(alpha, red, green, blue)
+    }
+}
+
+impl From<Color> for (f32, f32, f32, f32) {
+    fn from(src: Color) -> Self {
+        src.get_rgba().into()
+    }
+}
+
 impl From<Color> for skia_safe::Color {
-    fn from(src: Color) -> skia_safe::Color {
-        skia_safe::Color::from_argb(src.a(), src.r(), src.g(), src.b())
+    fn from(src: Color) -> Self {
+        src.get_rgba().into()
     }
 }
 
 impl From<Color> for skia_safe::Color4f {
     fn from(src: Color) -> Self {
-        skia_safe::Color4f {
-            r: src.r() as f32 / 255.0,
-            g: src.g() as f32 / 255.0,
-            b: src.b() as f32 / 255.0,
-            a: src.a() as f32 / 255.0,
-        }
-    }
-}
-
-impl From<RGBA> for skia_safe::Color {
-    fn from(src: RGBA) -> skia_safe::Color {
-        skia_safe::Color::from_argb(src.a(), src.r(), src.g(), src.b())
+        src.get_rgba().into()
     }
 }
 
