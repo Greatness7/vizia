@@ -121,7 +121,7 @@ impl Submenu {
                                 Placement::BottomStart
                             }
                         }))
-                        .arrow_size(Pixels(0.0))
+                        .arrow_size(Pixels(1.0))
                         .checked(Submenu::is_open)
                         .on_hover(|cx| {
                             cx.emit_custom(
