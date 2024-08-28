@@ -121,6 +121,7 @@ pub(crate) trait ModelData: Any {
 
     fn as_any_ref(&self) -> &dyn Any;
 
+    #[cfg_attr(not(debug_assertions), allow(unused))]
     fn name(&self) -> Option<&'static str>;
 }
 

@@ -9,7 +9,7 @@ use crate::tree::{focus_backward, focus_forward, is_navigatable};
 use log::debug;
 use std::any::Any;
 use vizia_storage::LayoutParentIterator;
-use vizia_storage::{ParentIterator, TreeIterator};
+use vizia_storage::TreeIterator;
 
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -380,6 +380,8 @@ fn internal_state_updates(cx: &mut Context, window_event: &WindowEvent, meta: &m
 
             #[cfg(debug_assertions)]
             if *code == Code::KeyI && cx.modifiers.ctrl() {
+                use vizia_storage::ParentIterator;
+
                 debug!("Entity tree");
                 let (tree, views, cache) = (&cx.tree, &cx.views, &cx.cache);
                 let has_next_sibling = |entity| tree.get_next_sibling(entity).is_some();

@@ -28,6 +28,7 @@ pub(crate) trait Store {
     /// Returns true if the model or view is the source of the store.
     fn contains_source(&self, model: ModelOrView) -> bool;
 
+    #[cfg_attr(not(debug_assertions), allow(unused))]
     fn name(&self) -> String;
 }
 
