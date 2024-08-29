@@ -45,6 +45,14 @@ comrak = {version = "0.27", default-features = false }
 open = "5.2"
 sha2 = "0.10"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.56", features = [
+    "Win32_Foundation",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [lib]
 doctest = false
 

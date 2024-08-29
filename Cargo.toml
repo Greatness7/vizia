@@ -286,13 +286,24 @@ name = "debug"
 path = "examples/debug.rs"
 
 [features]
-default = ["winit", "clipboard", "x11", "wayland"]
+default = [
+    "winit",
+    "clipboard",
+    "x11",
+    "wayland",
+    "gl",
+    # "d3d",
+    # "vulkan",
+]
 clipboard = ["vizia_core/clipboard", "vizia_winit?/clipboard"]
 winit = ["vizia_winit"]
 baseview = ["vizia_baseview"]
 x11 = ["vizia_winit?/x11", "vizia_core/x11"]
 wayland = ["vizia_winit?/wayland", "vizia_core/wayland"]
 accesskit = ["vizia_winit?/accesskit"]
+gl = ["vizia_winit/gl"]
+d3d = ["vizia_winit/d3d"]
+vulkan = ["vizia_winit/vulkan"]
 
 [dependencies]
 vizia_core = { version = "0.1.0", path = "crates/vizia_core"}

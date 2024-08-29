@@ -1,8 +1,6 @@
 use crate::{animation::Interpolator, cache::CachedData, prelude::*};
 use morphorm::Node;
-use skia_safe::{
-    canvas::SaveLayerRec, ClipOp, ImageFilter, Matrix, Paint, Rect, SamplingOptions, Surface,
-};
+use skia_safe::{canvas::SaveLayerRec, ClipOp, ImageFilter, Matrix, Paint, Rect, Surface};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use vizia_storage::{DrawChildIterator, DrawTreeIterator, LayoutTreeIterator};
@@ -137,18 +135,16 @@ pub(crate) fn transform_system(cx: &mut Context) {
     }
 }
 
-pub(crate) fn draw_system(
-    cx: &mut Context,
+pub(crate) fn draw_system<'a>(
+    cx: &'a mut Context,
     window_entity: Entity,
-    surface: &mut Surface,
-    dirty_surface: &mut Surface,
-) {
+) -> Option<impl FnOnce(&'a mut Surface, &'a mut Surface) -> BoundingBox> {
     if cx.windows.is_empty() {
-        return;
+        return None;
     }
 
     if !cx.entity_manager.is_alive(window_entity) {
-        return;
+        return None;
     }
 
     transform_system(cx);
@@ -158,10 +154,14 @@ pub(crate) fn draw_system(
     let mut dirty_rect = std::mem::take(&mut window.dirty_rect);
     let mut redraw_list = std::mem::take(&mut window.redraw_list);
 
-    let children = redraw_list
+    if redraw_list.is_empty() {
+        return None;
+    }
+
+    let children: Vec<_> = redraw_list
         .iter()
         .flat_map(|entity| DrawTreeIterator::subtree(&cx.tree, *entity))
-        .collect::<Vec<_>>();
+        .collect();
 
     redraw_list.extend(children);
 
@@ -192,58 +192,6 @@ pub(crate) fn draw_system(
         }
     }
 
-    let canvas = dirty_surface.canvas();
-
-    canvas.save();
-
-    if let Some(rect) = dirty_rect.map(Rect::from) {
-        canvas.clip_rect(rect, ClipOp::Intersect, false);
-        canvas.clear(Color::transparent());
-    }
-
-    cx.resource_manager.mark_images_unused();
-
-    let mut queue = BinaryHeap::new();
-    queue.push(ZEntity { index: 0, entity: window_entity, visible: true });
-
-    while let Some(zentity) = queue.pop() {
-        canvas.save();
-        draw_entity(
-            &mut DrawContext {
-                current: zentity.entity,
-                style: &cx.style,
-                cache: &mut cx.cache,
-                tree: &cx.tree,
-                data: &cx.data,
-                views: &mut cx.views,
-                resource_manager: &cx.resource_manager,
-                text_context: &mut cx.text_context,
-                modifiers: &cx.modifiers,
-                mouse: &cx.mouse,
-            },
-            &dirty_rect,
-            canvas,
-            zentity.index,
-            &mut queue,
-            zentity.visible,
-        );
-        canvas.restore();
-    }
-
-    canvas.restore();
-
-    surface.canvas().clear(Color::transparent());
-    dirty_surface.draw(surface.canvas(), (0, 0), SamplingOptions::default(), None);
-
-    // Debug draw dirty rect
-    // if let Some(rect) = dirty_rect.map(Rect::from) {
-    //     let mut paint = Paint::default();
-    //     paint.set_style(skia_safe::PaintStyle::Stroke);
-    //     paint.set_color(Color::red());
-    //     paint.set_stroke_width(1.0);
-    //     surface.canvas().draw_rect(rect, &paint);
-    // }
-
     for entity in redraw_list {
         if entity.visible(&cx.style) {
             let draw_bounds = draw_bounds(&cx.style, &cx.cache, &cx.tree, entity);
@@ -256,8 +204,66 @@ pub(crate) fn draw_system(
         }
     }
 
-    window.redraw_list.clear();
-    window.dirty_rect = None;
+    let clip_rect = dirty_rect.map(Rect::from)?;
+    if clip_rect.is_empty() {
+        // println!("dirty rect is empty!");
+        return None;
+    }
+
+    Some(move |surface: &mut Surface, dirty_surface: &mut Surface| {
+        // println!("is_empty: {:?} @ {:?}", dirty_rect, std::time::Instant::now());
+
+        // let canvas = surface.canvas();
+        let canvas = dirty_surface.canvas();
+
+        canvas.save();
+
+        canvas.clip_rect(clip_rect, ClipOp::Intersect, false);
+        canvas.clear(Color::transparent());
+
+        let mut queue = BinaryHeap::new();
+        queue.push(ZEntity { index: 0, entity: window_entity, visible: true });
+
+        while let Some(zentity) = queue.pop() {
+            canvas.save();
+            draw_entity(
+                &mut DrawContext {
+                    current: zentity.entity,
+                    style: &cx.style,
+                    cache: &mut cx.cache,
+                    tree: &cx.tree,
+                    data: &cx.data,
+                    views: &mut cx.views,
+                    resource_manager: &cx.resource_manager,
+                    text_context: &mut cx.text_context,
+                    modifiers: &cx.modifiers,
+                    mouse: &cx.mouse,
+                },
+                &dirty_rect,
+                canvas,
+                zentity.index,
+                &mut queue,
+                zentity.visible,
+            );
+            canvas.restore();
+        }
+
+        canvas.restore();
+
+        surface.canvas().clear(Color::transparent());
+        dirty_surface.draw(surface.canvas(), (0, 0), skia_safe::SamplingOptions::default(), None);
+
+        // Debug draw dirty rect
+        // let mut paint = Paint::default();
+        // paint.set_style(skia_safe::PaintStyle::Stroke);
+        // paint.set_color(Color::red());
+        // paint.set_stroke_width(1.0);
+        // surface.canvas().draw_rect(clip_rect, &paint);
+
+        cx.resource_manager.mark_images_unused();
+
+        dirty_rect.unwrap()
+    })
 }
 
 fn draw_entity(

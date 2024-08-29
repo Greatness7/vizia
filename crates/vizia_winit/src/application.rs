@@ -4,7 +4,7 @@ use crate::{
     window_modifiers::WindowModifiers,
 };
 use hashbrown::HashMap;
-use std::{error::Error, fmt::Display, sync::Arc};
+use std::{cell::Cell, error::Error, fmt::Display, sync::Arc};
 
 // #[cfg(feature = "accesskit")]
 // use accesskit::{Action, NodeBuilder, NodeId, TreeUpdate};
@@ -16,7 +16,7 @@ use vizia_core::prelude::*;
 use vizia_core::{backend::*, events::EventManager};
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalSize},
     error::EventLoopError,
     event::ElementState,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
@@ -46,6 +46,8 @@ use vizia_window::WindowPosition;
 #[derive(Debug)]
 pub enum UserEvent {
     Event(Event),
+    EnterSizeMove(WindowId),
+    ExitSizeMove(WindowId),
     #[cfg(feature = "accesskit")]
     AccessKitActionRequest(accesskit_winit::ActionRequestEvent),
 }
@@ -118,6 +120,10 @@ impl EventProxy for WinitEventProxy {
     }
 }
 
+thread_local! {
+    static RESIZE: Cell<Option<(WindowId, PhysicalSize<u32>)>> = Cell::new(None);
+}
+
 impl Application {
     pub fn new<F>(content: F) -> Self
     where
@@ -172,6 +178,9 @@ impl Application {
                     window_attributes = window_attributes.with_owner_window(handle.hwnd.get());
                 }
 
+                // Fix resizing artifacts.
+                // let window_attributes = window_attributes.with_no_redirection_bitmap(true);
+
                 // The current version of winit spawns new windows with unspecified position/size.
                 // As a workaround, we'll hide the window during creation and reveal it afterward.
                 let visible = window_attributes.visible;
@@ -185,6 +194,10 @@ impl Application {
                 // Instead we use the "cloak" attribute, which hides the window without that issue.
                 set_cloak(&window, true);
                 window.set_visible(visible);
+
+                //
+                set_window_suclass(&window, self.event_loop_proxy.clone());
+
                 window
             }
 
@@ -194,8 +207,11 @@ impl Application {
             }
         };
 
+        window.set_ime_allowed(true);
+
         let window = Arc::new(window);
-        let window_state = WinState::new(event_loop, window.clone(), window_entity)?;
+        let window_state =
+            WinState::new(event_loop, window.clone(), window_description, window_entity)?;
 
         let window_id = window_state.window.id();
         self.windows.insert(window_id, window_state);
@@ -249,6 +265,77 @@ impl Application {
     pub fn run(mut self) -> Result<(), ApplicationError> {
         self.event_loop.take().unwrap().run_app(&mut self).map_err(ApplicationError::EventLoopError)
     }
+
+    pub fn resize(&mut self, window_id: WindowId, size: PhysicalSize<u32>) {
+        let Some(window) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+
+        if !window.resize(size) {
+            return; // WHY CANT I RETURN HERE?
+        }
+
+        self.cx.set_window_size(window.entity, size.width as f32, size.height as f32);
+        self.cx.needs_refresh(window.entity);
+
+        #[cfg(target_os = "windows")]
+        {
+            while self.event_manager.flush_events(self.cx.context()) {}
+
+            self.cx.process_style_updates();
+            self.cx.process_animations();
+            self.cx.process_visual_updates();
+
+            #[cfg(feature = "accesskit")]
+            self.cx.process_tree_updates(|tree_updates| {
+                for update in tree_updates.iter_mut() {
+                    accesskit.update_if_active(|| update.take().unwrap());
+                }
+            });
+        }
+    }
+
+    pub fn redraw(&mut self) {
+        #[cfg(target_os = "windows")]
+        if self.windows.values().any(|window| window.is_moving_or_resizing) {
+            while self.event_manager.flush_events(self.cx.context()) {}
+
+            self.cx.process_style_updates();
+            self.cx.process_animations();
+            self.cx.process_visual_updates();
+
+            #[cfg(feature = "accesskit")]
+            self.cx.process_tree_updates(|tree_updates| {
+                for update in tree_updates.iter_mut() {
+                    accesskit.update_if_active(|| update.take().unwrap());
+                }
+            });
+        }
+
+        for window in self.windows.values_mut() {
+            window.make_current();
+
+            let Some(draw_surface_fn) = self.cx.draw(window.entity) else {
+                continue;
+            };
+            let Some((surface, dirty_surface)) = window.surfaces_mut() else {
+                continue;
+            };
+
+            let dirty_rect = draw_surface_fn(surface, dirty_surface);
+
+            // println!("Successful Redraw: {:?}", dirty_rect);
+
+            window.swap_buffers(dirty_rect);
+
+            // Un-cloak
+            #[cfg(target_os = "windows")]
+            if window.is_initially_cloaked {
+                window.is_initially_cloaked = false;
+                set_cloak(window.window(), false);
+            }
+        }
+    }
 }
 
 impl ApplicationHandler<UserEvent> for Application {
@@ -256,6 +343,17 @@ impl ApplicationHandler<UserEvent> for Application {
         match user_event {
             UserEvent::Event(event) => {
                 self.cx.send_event(event);
+            }
+
+            UserEvent::EnterSizeMove(window_id) => {
+                if let Some(window) = self.windows.get_mut(&window_id) {
+                    window.is_moving_or_resizing = true;
+                }
+            }
+            UserEvent::ExitSizeMove(window_id) => {
+                if let Some(window) = self.windows.get_mut(&window_id) {
+                    window.is_moving_or_resizing = false;
+                }
             }
 
             #[cfg(feature = "accesskit")]
@@ -336,39 +434,13 @@ impl ApplicationHandler<UserEvent> for Application {
         window_id: WindowId,
         event: winit::event::WindowEvent,
     ) {
-        let window = match self.windows.get_mut(&window_id) {
-            Some(window) => window,
-            None => return,
+        let Some(window) = self.windows.get_mut(&window_id) else {
+            return;
         };
 
         match event {
             winit::event::WindowEvent::Resized(size) => {
-                window.resize(size);
-                self.cx.set_window_size(window.entity, size.width as f32, size.height as f32);
-                self.cx.needs_refresh(window.entity);
-                window.window().request_redraw();
-
-                #[cfg(target_os = "windows")]
-                {
-                    while self.event_manager.flush_events(self.cx.context()) {}
-
-                    self.cx.process_style_updates();
-
-                    if self.cx.process_animations() {
-                        window.window().request_redraw();
-                    }
-
-                    self.cx.process_visual_updates();
-
-                    #[cfg(feature = "accesskit")]
-                    self.cx.process_tree_updates(|tree_updates| {
-                        for update in tree_updates.iter_mut() {
-                            accesskit.update_if_active(|| update.take().unwrap());
-                        }
-                    });
-
-                    window.window().request_redraw();
-                }
+                self.resize(window_id, size);
             }
 
             winit::event::WindowEvent::Moved(position) => {
@@ -427,32 +499,28 @@ impl ApplicationHandler<UserEvent> for Application {
             }
             winit::event::WindowEvent::ModifiersChanged(modifiers) => {
                 self.cx.modifiers().set(Modifiers::SHIFT, modifiers.state().shift_key());
-
                 self.cx.modifiers().set(Modifiers::ALT, modifiers.state().alt_key());
-
                 self.cx.modifiers().set(Modifiers::CTRL, modifiers.state().control_key());
-
                 self.cx.modifiers().set(Modifiers::SUPER, modifiers.state().super_key());
-
                 window.window().request_redraw();
             }
-            winit::event::WindowEvent::Ime(_) => {}
-            winit::event::WindowEvent::CursorMoved { device_id: _, position } => {
+            winit::event::WindowEvent::Ime(..) => {}
+            winit::event::WindowEvent::CursorMoved { position, .. } => {
                 self.cx.emit_window_event(
                     window.entity,
                     WindowEvent::MouseMove(position.x as f32, position.y as f32),
                 );
                 window.window().request_redraw();
             }
-            winit::event::WindowEvent::CursorEntered { device_id: _ } => {
+            winit::event::WindowEvent::CursorEntered { .. } => {
                 self.cx.emit_window_event(window.entity, WindowEvent::MouseEnter);
                 window.window().request_redraw();
             }
-            winit::event::WindowEvent::CursorLeft { device_id: _ } => {
+            winit::event::WindowEvent::CursorLeft { .. } => {
                 self.cx.emit_window_event(window.entity, WindowEvent::MouseLeave);
                 window.window().request_redraw();
             }
-            winit::event::WindowEvent::MouseWheel { device_id: _, delta, phase: _ } => {
+            winit::event::WindowEvent::MouseWheel { delta, .. } => {
                 let out_event = match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         WindowEvent::MouseScroll(x, y)
@@ -468,7 +536,7 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.cx.emit_window_event(window.entity, out_event);
                 window.window().request_redraw();
             }
-            winit::event::WindowEvent::MouseInput { device_id: _, state, button } => {
+            winit::event::WindowEvent::MouseInput { state, button, .. } => {
                 let button = match button {
                     winit::event::MouseButton::Left => MouseButton::Left,
                     winit::event::MouseButton::Right => MouseButton::Right,
@@ -501,21 +569,13 @@ impl ApplicationHandler<UserEvent> for Application {
                 };
                 self.cx.emit_window_event(window.entity, WindowEvent::ThemeChanged(theme));
             }
-            winit::event::WindowEvent::Occluded(_) => {}
+            winit::event::WindowEvent::Occluded(..) => {}
             winit::event::WindowEvent::RedrawRequested => {
-                for window in self.windows.values_mut() {
-                    window.make_current();
-                    //self.cx.needs_refresh(window.entity);
-                    self.cx.draw(window.entity, &mut window.surface, &mut window.dirty_surface);
-                    window.swap_buffers();
-
-                    // Un-cloak
-                    #[cfg(target_os = "windows")]
-                    if window.is_initially_cloaked {
-                        window.is_initially_cloaked = false;
-                        set_cloak(window.window(), false);
-                    }
+                if let Some((window_id, size)) = RESIZE.take() {
+                    // println!("resize: {:?} (WindowEvent::RedrawRequested | WM_NCCALCSIZE)", size);
+                    self.resize(window_id, size);
                 }
+                self.redraw();
             }
 
             _ => {}
@@ -821,7 +881,7 @@ fn apply_window_description(description: &WindowDescription) -> WindowAttributes
 ///
 #[cfg(target_os = "windows")]
 fn set_cloak(window: &winit::window::Window, state: bool) -> bool {
-    use windows_sys::Win32::{
+    use windows::Win32::{
         Foundation::{BOOL, FALSE, HWND, TRUE},
         Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK},
     };
@@ -834,14 +894,14 @@ fn set_cloak(window: &winit::window::Window, state: bool) -> bool {
 
     let result = unsafe {
         DwmSetWindowAttribute(
-            handle.hwnd.get() as HWND,
-            DWMWA_CLOAK as u32,
+            HWND(handle.hwnd.get() as _),
+            DWMWA_CLOAK,
             std::ptr::from_ref(&value).cast(),
             std::mem::size_of::<BOOL>() as u32,
         )
     };
 
-    result == 0 // success
+    result.is_ok()
 }
 
 #[allow(unused_variables)]
@@ -924,4 +984,95 @@ pub fn load_default_cursors(event_loop: &ActiveEventLoop) -> HashMap<CursorIcon,
     }
 
     custom_cursors
+}
+
+#[cfg(target_os = "windows")]
+fn set_window_suclass(window: &winit::window::Window, event_loop_proxy: EventLoopProxy<UserEvent>) {
+    #[allow(unused)]
+    use windows::Win32::{
+        Foundation::*,
+        UI::{HiDpi::*, Shell::*, WindowsAndMessaging::*},
+    };
+
+    // A timer that triggers `WindowEvent::RedrawRequested`.
+    unsafe extern "system" fn timer_func(hwnd: HWND, _: u32, _: usize, _: u32) {
+        SendMessageW(hwnd, WM_PAINT, WPARAM(0), LPARAM(0));
+    }
+
+    // A subclass procedure for handling OS event messages.
+    unsafe extern "system" fn subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _idsubclass: usize,
+        refdata: usize,
+    ) -> LRESULT {
+        let window_id = WindowId::from(hwnd.0 as u64);
+        let event_loop_proxy = refdata as *mut EventLoopProxy<UserEvent>;
+
+        const REDRAW_TIMER_ID: usize = 0xFACADE; // use any unique value
+
+        match msg {
+            #[cfg(feature = "d3d")]
+            WM_NCCALCSIZE => {
+                let dpi = GetDpiForWindow(hwnd);
+                let caption = GetSystemMetricsForDpi(SM_CYCAPTION, dpi);
+                let frame = GetSystemMetricsForDpi(SM_CYFRAME, dpi);
+                let border = GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                let space = 2 * (frame + border);
+
+                let RECT { left, top, right, bottom } = std::ptr::read(lparam.0 as _);
+                let width = right - left - space;
+                let height = bottom - top - space - caption;
+
+                if width >= 0 && height >= 0 {
+                    RESIZE.set(Some((window_id, (width, height).into())));
+                    unsafe {
+                        SendMessageW(hwnd, WM_PAINT, WPARAM(0), LPARAM(0));
+
+                        // The low-order word of lParam specifies the new width of the client area.
+                        // The high-order word of lParam specifies the new height of the client area.
+                        // SendMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(0));
+                        // SendMessageW(
+                        //     hwnd,
+                        //     WM_SIZE,
+                        //     WPARAM(0),
+                        //     LPARAM(((height << 16) | width) as isize),
+                        // );
+                    }
+                }
+            }
+            #[cfg(feature = "d3d")]
+            WM_SIZE => {
+                // Block this message, do resizing in `WM_NCCALCSIZE`.
+                return LRESULT(1);
+            }
+            WM_ENTERSIZEMOVE => {
+                if let Some(proxy) = event_loop_proxy.as_mut() {
+                    let _ = proxy.send_event(UserEvent::EnterSizeMove(window_id));
+                    let _ = SetTimer(hwnd, REDRAW_TIMER_ID, 0, Some(timer_func));
+                }
+            }
+            WM_EXITSIZEMOVE => {
+                if let Some(proxy) = event_loop_proxy.as_mut() {
+                    let _ = proxy.send_event(UserEvent::ExitSizeMove(window_id));
+                    let _ = KillTimer(hwnd, REDRAW_TIMER_ID);
+                }
+            }
+            WM_DESTROY => {
+                let _ = unsafe { Box::from_raw(event_loop_proxy) };
+            }
+            _ => {}
+        }
+
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    // Apply the window subclass.
+    let hwnd = HWND(u64::from(window.id()) as isize);
+    let refdata = Box::into_raw(Box::new(event_loop_proxy)) as usize;
+    unsafe {
+        let _ = SetWindowSubclass(hwnd, Some(subclass_proc), 0, refdata);
+    }
 }
