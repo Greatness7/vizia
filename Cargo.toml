@@ -306,8 +306,9 @@ reqwest = { version = "0.11.18", features = ["blocking"] }
 log = "0.4.19"
 fern = { version = "0.6" }
 
-[patch.crates-io.skia-safe]
-path = "../rust-skia/skia-safe"
+[patch.crates-io.ureq]
+git = "https://github.com/Greatness7/ureq.git"
+rev = "250605b85e3b9b67c22af1ec6b9b8bfd52f8b982"
 
 [workspace.lints.rust]
 # future_incompatible = "allow"
