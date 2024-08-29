@@ -145,15 +145,10 @@ pub fn build_paragraph(
     // Overflow
     match style.text_overflow.get(entity) {
         Some(&TextOverflow::Ellipsis) => {
-            paragraph_style.set_ellipsis("...");
+            paragraph_style.set_ellipsis("\u{2026}"); // Horizontal Ellipsis
         }
-
-        Some(&TextOverflow::Clip) => {
-            paragraph_style.set_ellipsis("");
-        }
-
-        _ => {
-            paragraph_style.set_ellipsis("");
+        Some(&TextOverflow::Clip) | None => {
+            paragraph_style.set_ellipsis("\u{200B}"); // Zero Width Space
         }
     }
 
